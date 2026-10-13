@@ -241,7 +241,7 @@
                 initModalOptions();
             } catch (e) {
                 console.error('マスター取得エラー:', e);
-                alert('マスタデータの取得に失敗しました。');
+                alert('【原因】' + e.message);
             }
         }
 
