@@ -228,7 +228,12 @@
                 if (vRes.error) throw vRes.error;
                 if (dRes.error) throw dRes.error;
                 if (lRes.error) throw lRes.error;
-
+                
+                // エラーが発生した場合、画面に詳細メッセージを表示する
+                if (vRes.error) throw new Error('vehiclesテーブルエラー: ' + vRes.error.message + ' (code: ' + vRes.error.code + ')');
+                if (dRes.error) throw new Error('driversテーブルエラー: ' + dRes.error.message + ' (code: ' + dRes.error.code + ')');
+                if (lRes.error) throw new Error('locationsテーブルエラー: ' + lRes.error.message + ' (code: ' + lRes.error.code + ')');
+                
                 vehicleMaster = vRes.data;
                 driverMaster = dRes.data;
                 locationMaster = lRes.data;
