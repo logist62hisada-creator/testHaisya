@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>車両配車管理ホワイトボード (DB蓄積・ドライバー交代対応)</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.3/dist/umd/supabase.js"></script>
     <style>
         .dispatch-card {
             cursor: grab;
@@ -188,7 +188,7 @@
             document.getElementById('modalDeleteBtn').addEventListener('click', deleteModalCard);
 
             const url = "https://vhmyrykelkewkawgqbkq.supabase.co";
-            const key = "sb_publishable_y5dVrjHlD_md5edMk2f2-g_WEhbYH0k";
+            const key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVwc2xla3ZxZXB1aWxuaXp4c3F2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyOTYyNzcsImV4cCI6MjEwNjg3MjI3N30.Xq1890wUN9_v3RekwHJmg6KugslDS8k2cuXGUJ1Wrbw";
             if (url && key) {
                 document.getElementById('supabaseUrl').value = url;
                 document.getElementById('supabaseKey').value = key;
