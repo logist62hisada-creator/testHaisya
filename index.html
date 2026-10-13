@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>車両配車管理ホワイトボード (DB蓄積・ドライバー交代対応)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        .dispatch-card {
+            cursor: grab;
+            user-select: none;
+            position: absolute;
+            top: 4px;
+            bottom: 4px;
+            z-index: 10;
+        }
+        .dispatch-card:active {
+            cursor: grabbing;
+        }
+        .resize-handle {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 10px;
+            cursor: ew-resize;
+            background: rgba(0, 0, 0, 0.08);
+            border-top-right-radius: 4px;
+            border-bottom-right-radius: 4px;
+        }
+        .resize-handle:hover {
+            background: rgba(0, 0, 0, 0.25);
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans min-h-screen flex flex-col">
+
+    <!-- 設定画面 -->
+    <div id="setupScreen" class="flex-1 flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
+            <h1 class="text-2xl font-bold mb-6 text-slate-900 text-center">Supabase 接続設定</h1>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">Project URL</label>
+                    <input type="text" id="supabaseUrl" class="w-full border rounded-lg px-3 py-2 text-sm" value="https://vhmyrykelkewkawgqbkq.supabase.co">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">Publishable Key</label>
+                    <input type="password" id="supabaseKey" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="sb_publishable_...">
+                </div>
+                <button id="connectBtn" class="w-full bg-blue-600 text-white font-semibold py-2 rounded-lg hover:bg-blue-700">接続して次へ</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- メイン画面 -->
+    <div id="mainScreen" class="hidden flex-1 flex flex-col">
+        <header class="bg-slate-800 text-white shadow px-6 py-3 flex justify-between items-center">
+            <h1 class="text-lg font-bold">車両配車管理ホワイトボード (DB蓄積)</h1>
+            <button id="logoutBtn" class="text-sm text-red-300 hover:underline">ログアウト</button>
+        </header>
+
+        <main class="flex-1 p-4 flex flex-col gap-4 overflow-hidden">
+            <!-- コントロール -->
+            <div class="bg-white rounded-lg shadow-sm p-3 flex justify-between items-center">
+                <div class="flex items-center space-x-2">
+                    <button id="prevDateBtn" class="px-3 py-1 border rounded text-sm">&lt; 前日</button>
+                    <input type="date" id="currentDateInput" class="border rounded px-3 py-1 text-sm">
+                    <button id="nextDateBtn" class="px-3 py-1 border rounded text-sm">翌日 &gt;</button>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <button id="addCardBtn" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-semibold hover:bg-blue-700">+ 配車カード追加</button>
+                    <div class="text-sm text-slate-600">未配車: <span id="unassignedCount" class="font-bold">0</span>件</div>
+                </div>
+            </div>
+
+            <!-- 未配車エリア -->
+            <div class="bg-white rounded-lg shadow-sm p-3">
+                <h2 class="text-xs font-bold text-slate-600 mb-2">📌 未配車ボックス（カードをダブルクリックすると編集できます）</h2>
+                <div id="unassignedArea" class="flex gap-2 overflow-x-auto min-h-[75px] p-2 bg-slate-50 border border-dashed rounded items-center" ondragover="allowDrop(event)" ondrop="dropToUnassigned(event)"></div>
+            </div>
+
+            <!-- タイムラインボード (0〜24時) -->
+            <div class="bg-white rounded-lg shadow-sm flex-1 flex flex-col overflow-hidden border">
+                <div class="overflow-auto flex-1">
+                    <div style="min-width: 1500px;">
+                        <div class="grid grid-cols-[200px_repeat(24,minmax(50px,1fr))] bg-slate-100 border-b text-xs font-bold text-slate-700 text-center sticky top-0 z-20">
+                            <div class="p-2 border-r bg-slate-200 flex items-center justify-center">車番 / ドライバー（交代対応）</div>
+                            <script>
+                                for(let i=0; i<24; i++) {
+                                    document.write(`<div class="p-2 border-r">${i}:00</div>`);
+                                }
+                            </script>
+                        </div>
+                        <div id="boardLanes" class="divide-y"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- カード編集/追加用 モーダルウィンドウ -->
+    <div id="cardModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 relative">
+            <h2 id="modalTitle" class="text-lg font-bold text-slate-900 mb-4">配車カードの編集</h2>
+            <input type="hidden" id="modalCardId">
+            
+            <div class="space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">積地</label>
+                        <select id="modalLoadingPlace" class="w-full border rounded-lg px-3 py-2 text-sm bg-white"></select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">卸地</label>
+                        <select id="modalUnloadingPlace" class="w-full border rounded-lg px-3 py-2 text-sm bg-white"></select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">配車状態</label>
+                        <select id="modalStatus" class="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+                            <option value="unassigned">未配車</option>
+                            <option value="assigned">配車済み</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">車番</label>
+                        <select id="modalVehicle" class="w-full border rounded-lg px-3 py-2 text-sm bg-white"></select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">運転手名</label>
+                        <select id="modalDriver" class="w-full border rounded-lg px-3 py-2 text-sm bg-white"></select>
+                    </div>
+                    <div></div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">開始時刻</label>
+                        <input type="time" id="modalStartTime" class="w-full border rounded-lg px-3 py-2 text-sm" value="09:00">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1">終了時刻</label>
+                        <input type="time" id="modalEndTime" class="w-full border rounded-lg px-3 py-2 text-sm" value="11:00">
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex justify-between items-center mt-6 pt-4 border-t">
+                <button id="modalDeleteBtn" class="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-100 transition">削除</button>
+                <div class="space-x-2">
+                    <button id="modalCancelBtn" class="px-4 py-2 border rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition">キャンセル</button>
+                    <button id="modalSaveBtn" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let supabaseClient = null;
+        let currentDate = new Date().toISOString().split('T')[0];
+        
+        let vehicleMaster = [];
+        let driverMaster = [];
+        let locationMaster = [];
+        let cardsData = [];
+
+        window.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('currentDateInput').value = currentDate;
+            document.getElementById('connectBtn').addEventListener('click', saveConfig);
+            document.getElementById('logoutBtn').addEventListener('click', logout);
+            document.getElementById('prevDateBtn').addEventListener('click', () => changeDate(-1));
+            document.getElementById('nextDateBtn').addEventListener('click', () => changeDate(1));
+            document.getElementById('currentDateInput').addEventListener('change', (e) => { 
+                currentDate = e.target.value; 
+                loadDispatchData(); 
+            });
+            document.getElementById('addCardBtn').addEventListener('click', () => openModal(null));
+
+            document.getElementById('modalCancelBtn').addEventListener('click', closeModal);
+            document.getElementById('modalSaveBtn').addEventListener('click', saveModalCard);
+            document.getElementById('modalDeleteBtn').addEventListener('click', deleteModalCard);
+
+            const url = localStorage.getItem('SUPABASE_URL');
+            const key = localStorage.getItem('SUPABASE_ANON_KEY');
+            if (url && key) {
+                document.getElementById('supabaseUrl').value = url;
+                document.getElementById('supabaseKey').value = key;
+                initSupabase(url, key);
+            }
+        });
+
+        function saveConfig() {
+            const url = document.getElementById('supabaseUrl').value.trim();
+            const key = document.getElementById('supabaseKey').value.trim();
+            if (!url || !key) return alert('入力してください');
+            localStorage.setItem('SUPABASE_URL', url);
+            localStorage.setItem('SUPABASE_ANON_KEY', key);
+            initSupabase(url, key);
+        }
+
+        async function initSupabase(url, key) {
+            try {
+                supabaseClient = window.supabase.createClient(url, key);
+                document.getElementById('setupScreen').classList.add('hidden');
+                document.getElementById('mainScreen').classList.remove('hidden');
+                await fetchMasters();
+                loadDispatchData();
+            } catch (e) {
+                alert('Supabase初期化エラー: ' + e.message);
+            }
+        }
+
+        async function fetchMasters() {
+            try {
+                const [vRes, dRes, lRes] = await Promise.all([
+                    supabaseClient.from('vehicles').select('*').order('id'),
+                    supabaseClient.from('drivers').select('*').order('id'),
+                    supabaseClient.from('locations').select('*').order('id')
+                ]);
+
+                if (vRes.error) throw vRes.error;
+                if (dRes.error) throw dRes.error;
+                if (lRes.error) throw lRes.error;
+
+                vehicleMaster = vRes.data;
+                driverMaster = dRes.data;
+                locationMaster = lRes.data;
+
+                initModalOptions();
+            } catch (e) {
+                console.error('マスター取得エラー:', e);
+                alert('マスタデータの取得に失敗しました。');
+            }
+        }
+
+        function initModalOptions() {
+            const vehicleSelect = document.getElementById('modalVehicle');
+            vehicleSelect.innerHTML = '';
+            vehicleMaster.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.id;
+                opt.textContent = v.vehicle_name;
+                vehicleSelect.appendChild(opt);
+            });
+
+            const driverSelect = document.getElementById('modalDriver');
+            driverSelect.innerHTML = '';
+            driverMaster.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.id;
+                opt.textContent = d.driver_name;
+                driverSelect.appendChild(opt);
+            });
+
+            const loadingSelect = document.getElementById('modalLoadingPlace');
+            const unloadingSelect = document.getElementById('modalUnloadingPlace');
+            loadingSelect.innerHTML = '';
+            unloadingSelect.innerHTML = '';
+
+            locationMaster.forEach(l => {
+                const opt1 = document.createElement('option');
+                opt1.value = l.id;
+                opt1.textContent = l.location_name;
+                loadingSelect.appendChild(opt1);
+
+                const opt2 = document.createElement('option');
+                opt2.value = l.id;
+                opt2.textContent = l.location_name;
+                unloadingSelect.appendChild(opt2);
+            });
+        }
+
+        async function loadDispatchData() {
+            if (!supabaseClient) return;
+            try {
+                const { data, error } = await supabaseClient
+                    .from('dispatch_cards')
+                    .select('*')
+                    .eq('dispatch_date', currentDate);
+
+                if (error) throw error;
+
+                cardsData = data.map(item => ({
+                    id: item.id,
+                    dispatchDate: item.dispatch_date,
+                    loadingId: item.loading_location_id,
+                    unloadingId: item.unloading_location_id,
+                    startTime: item.start_time,
+                    endTime: item.end_time,
+                    status: item.status,
+                    vehicleId: item.vehicle_id,
+                    driverId: item.driver_id
+                }));
+
+                renderBoard();
+            } catch (e) {
+                console.error('配車データ読込エラー:', e);
+            }
+        }
+
+        async function saveCardToDB(card) {
+            const payload = {
+                dispatch_date: currentDate,
+                loading_location_id: card.loadingId,
+                unloading_location_id: card.unloadingId,
+                start_time: card.startTime,
+                end_time: card.endTime,
+                status: card.status,
+                vehicle_id: card.status === 'assigned' ? card.vehicleId : null,
+                driver_id: card.status === 'assigned' ? card.driverId : null
+            };
+
+            if (typeof card.id === 'number') {
+                const { error } = await supabaseClient
+                    .from('dispatch_cards')
+                    .update(payload)
+                    .eq('id', card.id);
+                if (error) alert('更新エラー: ' + error.message);
+            } else {
+                const { data, error } = await supabaseClient
+                    .from('dispatch_cards')
+                    .insert([payload])
+                    .select();
+                if (error) {
+                    alert('登録エラー: ' + error.message);
+                } else if (data && data.length > 0) {
+                    card.id = data[0].id;
+                }
+            }
+        }
+
+        function getLocationName(id) {
+            const loc = locationMaster.find(l => l.id === id);
+            return loc ? loc.location_name : '未設定';
+        }
+
+        function renderBoard() {
+            renderUnassigned();
+            renderLanes();
+        }
+
+        function timeToMinutes(timeStr) {
+            if (!timeStr) return 0;
+            const [h, m] = timeStr.split(':').map(Number);
+            return (h * 60) + m;
+        }
+
+        function minutesToTime(totalMinutes) {
+            let m = Math.max(0, Math.min(24 * 60, totalMinutes));
+            m = Math.round(m / 5) * 5;
+            const h = Math.floor(m / 60);
+            const min = m % 60;
+            return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+        }
+
+        function renderUnassigned() {
+            const container = document.getElementById('unassignedArea');
+            const list = cardsData.filter(c => c.status === 'unassigned');
+            document.getElementById('unassignedCount').textContent = list.length;
+            container.innerHTML = list.length === 0 ? '<span class="text-xs text-slate-400 px-2">なし</span>' : '';
+            list.forEach(card => container.appendChild(createCardEl(card, false)));
+        }
+
+        function renderLanes() {
+            const lanesContainer = document.getElementById('boardLanes');
+            lanesContainer.innerHTML = '';
+
+            vehicleMaster.forEach((vehicle) => {
+                let row = document.createElement('div');
+                row.className = 'grid grid-cols-[200px_repeat(24,minmax(50px,1fr))] items-stretch bg-white hover:bg-slate-50 min-h-[60px] relative';
+                
+                let label = document.createElement('div');
+                label.className = 'p-2 border-r text-xs bg-slate-50 sticky left-0 z-20 flex flex-col justify-center';
+                
+                const assignedCards = cardsData.filter(c => c.status === 'assigned' && c.vehicleId === vehicle.id);
+                
+                let assignedDriversMap = new Map();
+                assignedCards.forEach(card => {
+                    if (card.driverId) {
+                        const drv = driverMaster.find(d => d.id === card.driverId);
+                        if (drv) assignedDriversMap.set(drv.id, drv.driver_name);
+                    }
+                });
+
+                let driverNamesHtml = '';
+                if (assignedDriversMap.size > 0) {
+                    driverNamesHtml = Array.from(assignedDriversMap.values()).join(' / ');
+                } else {
+                    driverNamesHtml = '<span class="text-slate-400">（運転手未設定）</span>';
+                }
+
+                label.innerHTML = `<span class="font-bold text-slate-800 text-[13px]">${vehicle.vehicle_name}</span><span class="text-[11px] text-blue-600 font-medium mt-0.5 truncate" title="${driverNamesHtml}">👤 ${driverNamesHtml}</span>`;
+                row.appendChild(label);
+
+                for (let h = 0; h < 24; h++) {
+                    let cell = document.createElement('div');
+                    cell.className = 'border-r h-full min-h-[60px] p-1 relative';
+                    cell.ondragover = allowDrop;
+                    cell.ondrop = (e) => dropToLane(e, vehicle.id, h);
+                    row.appendChild(cell);
+                }
+
+                const hoursContainerWrapper = document.createElement('div');
+                hoursContainerWrapper.className = 'absolute top-0 bottom-0 left-[200px] right-0 pointer-events-none z-10';
+                
+                assignedCards.forEach(card => {
+                    hoursContainerWrapper.appendChild(createCardEl(card, true));
+                });
+
+                row.appendChild(hoursContainerWrapper);
+                lanesContainer.appendChild(row);
+            });
+        }
+
+        function createCardEl(card, assigned) {
+            const el = document.createElement('div');
+            // 縦に情報を積み重ねるレイアウトに変更（flex-col）
+            el.className = 'dispatch-card bg-amber-100 border border-amber-300 rounded p-1.5 text-[11px] shadow-sm flex flex-col justify-center pointer-events-auto overflow-hidden';
+            
+            const routeText = `${getLocationName(card.loadingId)} → ${getLocationName(card.unloadingId)}`;
+            const driverObj = driverMaster.find(d => d.id === card.driverId);
+            const driverName = driverObj ? driverObj.driver_name : '未設定';
+
+            if (assigned) {
+                const startMin = timeToMinutes(card.startTime);
+                const endMin = timeToMinutes(card.endTime);
+                let durationMin = endMin - startMin;
+                if (durationMin < 15) durationMin = 15;
+
+                const boardInnerWidth = document.querySelector('#boardLanes div')?.clientWidth - 200 || 1400;
+                const pxPerMinute = boardInnerWidth / (24 * 60);
+
+                const leftPercent = (startMin / (24 * 60)) * 100;
+                const widthPercent = (durationMin / (24 * 60)) * 100;
+
+                el.style.position = 'absolute';
+                el.style.left = `${leftPercent}%`;
+                el.style.width = `${widthPercent}%`;
+
+                // カード内表示: 1行目 ドライバー名、2行目 時間、3行目 積地→降地
+                el.innerHTML = `
+                    <div class="font-bold text-slate-900 truncate">👤 ${driverName}</div>
+                    <div class="text-[10px] font-semibold text-blue-700 truncate">🕒 ${card.startTime}〜${card.endTime}</div>
+                    <div class="text-[10px] text-slate-700 truncate">📍 ${routeText}</div>
+                `;
+
+                const handle = document.createElement('div');
+                handle.className = 'resize-handle';
+                handle.title = 'ドラッグして5分刻みで時間を調整';
+                
+                handle.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    
+                    const startX = e.clientX;
+                    const origEndMin = timeToMinutes(card.endTime);
+                    const origStartMin = timeToMinutes(card.startTime);
+
+                    function onMouseMove(moveEvent) {
+                        const diffX = moveEvent.clientX - startX;
+                        const diffMinutes = Math.round((diffX / pxPerMinute) / 5) * 5;
+                        
+                        let newEndMin = origEndMin + diffMinutes;
+                        if (newEndMin <= origStartMin + 5) newEndMin = origStartMin + 5;
+
+                        card.endTime = minutesToTime(newEndMin);
+                        renderBoard();
+                    }
+
+                    function onMouseUp() {
+                        window.removeEventListener('mousemove', onMouseMove);
+                        window.removeEventListener('mouseup', onMouseUp);
+                        saveCardToDB(card);
+                    }
+
+                    window.addEventListener('mousemove', onMouseMove);
+                    window.addEventListener('mouseup', onMouseUp);
+                });
+
+                el.appendChild(handle);
+            } else {
+                // 未配車ボックス内のカード表示
+                el.style.position = 'relative';
+                el.style.width = '240px';
+                el.innerHTML = `
+                    <div class="font-bold text-slate-900 truncate">👤 ${driverName}</div>
+                    <div class="text-[10px] font-semibold text-blue-700 truncate">🕒 ${card.startTime}〜${card.endTime}</div>
+                    <div class="text-[10px] text-slate-700 truncate">📍 ${routeText}</div>
+                `;
+            }
+
+            el.draggable = true;
+            el.addEventListener('dblclick', () => openModal(card));
+            el.addEventListener('dragstart', (e) => {
+                e.dataTransfer.setData('text/plain', card.id);
+            });
+
+            return el;
+        }
+
+        function openModal(card) {
+            const modal = document.getElementById('cardModal');
+            const titleEl = document.getElementById('modalTitle');
+            const deleteBtn = document.getElementById('modalDeleteBtn');
+
+            if (card) {
+                titleEl.textContent = '配車カードの編集';
+                document.getElementById('modalCardId').value = card.id;
+                document.getElementById('modalLoadingPlace').value = card.loadingId || (locationMaster[0]?.id || 1);
+                document.getElementById('modalUnloadingPlace').value = card.unloadingId || (locationMaster[0]?.id || 1);
+                document.getElementById('modalStatus').value = card.status;
+                document.getElementById('modalVehicle').value = card.vehicleId || (vehicleMaster[0]?.id || 1);
+                document.getElementById('modalDriver').value = card.driverId || (driverMaster[0]?.id || 1);
+                document.getElementById('modalStartTime').value = card.startTime || '09:00';
+                document.getElementById('modalEndTime').value = card.endTime || '11:00';
+                deleteBtn.classList.remove('hidden');
+            } else {
+                titleEl.textContent = '新規配車カード追加';
+                document.getElementById('modalCardId').value = '';
+                document.getElementById('modalLoadingPlace').value = locationMaster[0]?.id || 1;
+                document.getElementById('modalUnloadingPlace').value = locationMaster[0]?.id || 1;
+                document.getElementById('modalStatus').value = 'unassigned';
+                document.getElementById('modalVehicle').value = vehicleMaster[0]?.id || 1;
+                document.getElementById('modalDriver').value = driverMaster[0]?.id || 1;
+                document.getElementById('modalStartTime').value = '09:00';
+                document.getElementById('modalEndTime').value = '11:00';
+                deleteBtn.classList.add('hidden');
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('cardModal').classList.add('hidden');
+        }
+
+        async function saveModalCard() {
+            const idInput = document.getElementById('modalCardId').value;
+            const loadingId = parseInt(document.getElementById('modalLoadingPlace').value);
+            const unloadingId = parseInt(document.getElementById('modalUnloadingPlace').value);
+            const status = document.getElementById('modalStatus').value;
+            const vehicleId = parseInt(document.getElementById('modalVehicle').value);
+            const driverId = parseInt(document.getElementById('modalDriver').value);
+            const startTime = document.getElementById('modalStartTime').value;
+            const endTime = document.getElementById('modalEndTime').value;
+
+            let card;
+            if (idInput) {
+                card = cardsData.find(c => c.id == idInput);
+                if (card) {
+                    card.loadingId = loadingId;
+                    card.unloadingId = unloadingId;
+                    card.status = status;
+                    card.startTime = startTime;
+                    card.endTime = endTime;
+                    card.vehicleId = status === 'assigned' ? vehicleId : null;
+                    card.driverId = status === 'assigned' ? driverId : null;
+                }
+            } else {
+                card = {
+                    loadingId: loadingId,
+                    unloadingId: unloadingId,
+                    startTime: startTime,
+                    endTime: endTime,
+                    status: status,
+                    vehicleId: status === 'assigned' ? vehicleId : null,
+                    driverId: status === 'assigned' ? driverId : null
+                };
+                cardsData.push(card);
+            }
+
+            await saveCardToDB(card);
+            closeModal();
+            loadDispatchData();
+        }
+
+        async function deleteModalCard() {
+            const idInput = document.getElementById('modalCardId').value;
+            if (!idInput) return;
+            if (confirm('この配車カードのデータを削除しますか？')) {
+                const { error } = await supabaseClient
+                    .from('dispatch_cards')
+                    .delete()
+                    .eq('id', idInput);
+
+                if (error) {
+                    alert('削除エラー: ' + error.message);
+                } else {
+                    closeModal();
+                    loadDispatchData();
+                }
+            }
+        }
+
+        function allowDrop(e) { e.preventDefault(); }
+        
+        async function dropToUnassigned(e) {
+            e.preventDefault();
+            const id = e.dataTransfer.getData('text/plain');
+            if (!id) return;
+            const card = cardsData.find(c => c.id == id);
+            if (card) { 
+                card.status = 'unassigned'; 
+                card.vehicleId = null; 
+                card.driverId = null;
+                await saveCardToDB(card);
+                loadDispatchData(); 
+            }
+        }
+        
+        async function dropToLane(e, vehicleId, hour) {
+            e.preventDefault();
+            const id = e.dataTransfer.getData('text/plain');
+            if (-!id) return;
+            const card = cardsData.find(c => c.id == id);
+            if (card) { 
+                card.status = 'assigned'; 
+                card.vehicleId = vehicleId;
+
+                const startMin = timeToMinutes(card.startTime);
+                const endMin = timeToMinutes(card.endTime);
+                const duration = endMin - startMin;
+
+                let newStartMin = hour * 60;
+                card.startTime = minutesToTime(newStartMin);
+                card.endTime = minutesToTime(newStartMin + (duration > 0 ? duration : 60));
+
+                await saveCardToDB(card);
+                loadDispatchData(); 
+            }
+        }
+
+        function changeDate(days) {
+            let d = new Date(currentDate);
+            d.setDate(d.getDate() + days);
+            currentDate = d.toISOString().split('T')[0];
+            document.getElementById('currentDateInput').value = currentDate;
+            loadDispatchData();
+        }
+
+        function logout() {
+            localStorage.clear();
+            document.getElementById('mainScreen').classList.add('hidden');
+            document.getElementById('setupScreen').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
